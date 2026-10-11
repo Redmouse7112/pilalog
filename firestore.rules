@@ -1,0 +1,20 @@
+rules_version = '2';
+
+// PilaLog · reglas de Firestore
+//
+// Toda la información de la estancia vive bajo /familias/{codigo}/...
+// El código lo genera la app (pila- + 10 o más letras/números al azar) y solo
+// lo conocen Javier y Papá (viaja dentro del link que Javier le manda).
+// No se puede listar /familias, así que nadie puede descubrir otros códigos:
+// hay que conocer el código exacto para leer o escribir.
+//
+// Es seguridad "por link secreto": suficiente para una lista familiar, pero
+// no uses este esquema para datos realmente sensibles.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /familias/{codigo}/{recurso=**} {
+      allow read, write: if codigo.matches('^pila-[a-z0-9]{10,40}$');
+    }
+  }
+}
