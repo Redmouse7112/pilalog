@@ -1,3 +1,11 @@
+<p align="center"><strong>PilaLog</strong></p>
+
+> PilaLog · Lista de logística para la estancia: Papá arma los pedidos, Javier compra, compara precios y lleva. PWA instalable con estilo gauchesco.
+
+### 👉 [**Abrir la app**](https://redmouse7112.github.io/pilalog/)
+
+---
+
 # PilaLog · Logística de la estancia
 
 Del río Pilagá a la estancia. Una app instalable (PWA) con estilo gauchesco para
