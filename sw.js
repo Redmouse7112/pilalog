@@ -7,7 +7,7 @@
  *
  * Al publicar una versión nueva de la app, subí el número de VERSION.
  */
-const VERSION = 'pilalog-v4';
+const VERSION = 'pilalog-v5';
 const CACHE_FB = 'pilalog-firebase-v1';
 const APP_SHELL = [
   './',

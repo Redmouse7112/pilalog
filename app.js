@@ -16,6 +16,8 @@
   var ESTADO = { pedido: 'Pedido', comprado: 'Comprado', llevado: 'Llevado', noconseguido: 'No se consiguió' };
   var UNIDADES = ['u.', 'kg', 'g', 'l', 'ml', 'bolsa', 'caja', 'pack', 'rollo', 'metro'];
   var LS = { perfil: 'pilalog:perfil', escala: 'pilalog:escala', aviso: 'pilalog:ultimoAviso', instalarOculto: 'pilalog:instalarOculto' };
+  var SES = { invitado: 'pilalog:modoInvitado', vista: 'pilalog:vistaInvitado' };
+  var DEMO_CODIGO = 'demo-invitado';
 
   var logoN = 0;
   var LOGO = function (px) {
@@ -42,6 +44,9 @@
   function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* sin espacio o bloqueado */ } }
   function lsDel(k) { try { localStorage.removeItem(k); } catch (e) { /* nada */ } }
+  function ssGet(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
+  function ssSet(k, v) { try { sessionStorage.setItem(k, v); } catch (e) { /* sin espacio o bloqueado */ } }
+  function ssDel(k) { try { sessionStorage.removeItem(k); } catch (e) { /* nada */ } }
 
   var monedaEntera = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 0, maximumFractionDigits: 0 });
   var monedaCent = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -86,7 +91,7 @@
   }
 
   function catDe(id) { return CATS.find(function (c) { return c.id === id; }) || CATS[CATS.length - 1]; }
-  function rolNombre(rol) { return rol === 'papa' ? 'Papá' : 'Javier'; }
+  function rolNombre(rol) { return rol === 'papa' ? 'Papá' : rol === 'invitado' ? 'Invitado' : 'Javier'; }
 
   function normTel(txt) {
     var d = String(txt || '').replace(/\D/g, '');
@@ -112,7 +117,7 @@
 
   /* ===================================================================== estado */
   var S = {
-    perfil: null,            // { codigo, rol: 'papa' | 'javier' }
+    perfil: null,            // { codigo, rol: 'papa' | 'javier' | 'invitado', demo? }
     be: null,                // motor de datos
     desub: [],
     items: [], trips: [], ajustes: {},
@@ -124,13 +129,18 @@
     sellos: {},              // id -> última modificación vista (para avisar cambios del otro)
     cb: null,
     instalar: null,
-    raf: 0
+    raf: 0,
+    tk: 0,                   // identifica la conexión vigente
+    sembrando: false         // la demo ya se está sembrando
   };
   var sheetAbierto = false;
 
   function aj(k, def) { return S.ajustes[k] == null ? def : S.ajustes[k]; }
   function rol() { return S.perfil ? S.perfil.rol : 'papa'; }
-  function esJavier() { return rol() === 'javier'; }
+  function esDemo() { return !!(S.perfil && S.perfil.demo); }
+  function vistaInvitado() { return ssGet(SES.vista) === 'papa' ? 'papa' : 'javier'; }
+  function esJavier() { return rol() === 'javier' || (esDemo() && vistaInvitado() === 'javier'); }
+  function perfilDemo() { return { codigo: DEMO_CODIGO, rol: 'invitado', demo: true }; }
 
   function normItem(it) {
     it.nombre = it.nombre || 'Sin nombre';
@@ -145,17 +155,39 @@
   }
 
   /* ====================================================================== precios */
+  // Costo real de un pedido según cómo se cargó el precio:
+  // por unidad (monto × cantidad), de un pack cerrado (se compran packs enteros)
+  // o el total de la línea del ticket.
+  function costoDe(it, p) {
+    var monto = Number(p.monto) || 0, cant = Number(it.cant) || 0;
+    if (p.total) {
+      return { sub: monto, packs: 0, pack: 1, unit: cant > 0 ? monto / cant : monto, sobra: 0, total: true };
+    }
+    if (p.pack > 1) {
+      var packs = Math.max(1, Math.ceil(cant / p.pack - 1e-9));
+      var sobra = Math.round((packs * p.pack - cant) * 100) / 100;
+      return { sub: packs * monto, packs: packs, pack: p.pack, unit: monto / p.pack, sobra: sobra > 0 ? sobra : 0 };
+    }
+    return { sub: monto * cant, packs: 0, pack: 1, unit: monto, sobra: 0 };
+  }
+  function masBaratoDe(it) {
+    var mejor = null, mc = null;
+    it.precios.forEach(function (p) {
+      var c = costoDe(it, p);
+      if (!mejor || c.sub < mc.sub || (c.sub === mc.sub && c.unit < mc.unit)) { mejor = p; mc = c; }
+    });
+    return mejor;
+  }
   function precioUnit(it) {
     if (!it.precios.length) return null;
     var el = it.precios.find(function (p) { return p.id === it.elegido; });
-    if (el) return { monto: el.monto, lugar: el.lugar, elegido: true };
-    var min = it.precios.reduce(function (a, b) { return b.monto < a.monto ? b : a; });
-    return { monto: min.monto, lugar: min.lugar, elegido: false };
+    var p = el || masBaratoDe(it);
+    return Object.assign({ p: p, monto: p.monto, lugar: p.lugar, elegido: !!el }, costoDe(it, p));
   }
-  function subtotal(it) { var u = precioUnit(it); return u ? u.monto * it.cant : null; }
+  function subtotal(it) { var u = precioUnit(it); return u ? u.sub : null; }
   function masBarataId(it) {
     if (it.precios.length < 2) return null;
-    return it.precios.reduce(function (a, b) { return b.monto < a.monto ? b : a; }).id;
+    return masBaratoDe(it).id;
   }
   function lugaresConocidos() {
     var set = {};
@@ -195,9 +227,13 @@
     S.desub = [];
     S.loaded = { items: false, settings: false };
     render();
+    var tk = ++S.tk;
     try {
-      S.be = await window.PilaBackend.crear(S.perfil.codigo);
+      var be = await window.PilaBackend.crear(S.perfil.codigo, { local: esDemo() });
+      if (tk !== S.tk) return;      // mientras tanto se cambió de modo
+      S.be = be;
     } catch (e) {
+      if (tk !== S.tk) return;
       S.error = 'No se pudo cargar Firebase. Revisá la señal y probá de nuevo.';
       render();
       return;
@@ -226,6 +262,7 @@
     S.loaded.items = true;
     render();
     if (primera) setTimeout(recordatorioDiario, 600);
+    sembrarDemo();
   }
   function alRecibirViajes(datos, meta) {
     if (!datos) return falloDatos(meta);
@@ -237,6 +274,7 @@
     S.ajustes = datos;
     S.loaded.settings = true;
     render();
+    sembrarDemo();
   }
 
   function detectarCambios(nuevos) {
@@ -254,6 +292,7 @@
 
   /* ================================================================ notificaciones */
   async function mostrarNotif(titulo, cuerpo, tag) {
+    if (esDemo()) return false;
     if (!('Notification' in window) || Notification.permission !== 'granted') return false;
     try {
       var reg = navigator.serviceWorker && await navigator.serviceWorker.ready;
@@ -275,6 +314,7 @@
     return d >= 0 && d <= aj('avisoDias', 3) ? d : null;
   }
   function recordatorioDiario() {
+    if (esDemo()) return;
     var d = viajeCerca();
     if (d == null || lsGet(LS.aviso) === hoyISO()) return;
     lsSet(LS.aviso, hoyISO());
@@ -355,7 +395,7 @@
   }
   // Botón directo de instalación (sin pasar por los tres puntitos del navegador).
   function bannerInstalar(grande) {
-    if (yaInstalada()) return '';
+    if (yaInstalada() || esDemo()) return '';
     if (S.instalar) {
       if (!grande && instalarOculto()) return '';
       return '<div class="banner instalar"><b>Instalá PilaLog en tu teléfono</b>' +
@@ -381,7 +421,11 @@
       '<div class="acciones">' +
       '<button class="btn btn-oro grande" name="rol" value="papa">Entrar como Papá</button>' +
       '<button class="btn btn-ghost" name="rol" value="javier">Entrar como Javier (otro aparato)</button>' +
-      '</div></form></div>';
+      '</div></form>' +
+      '<hr class="sep-inv">' +
+      '<p class="o" style="margin-top:0">¿Querés probar la app o te la están mostrando?</p>' +
+      '<button class="btn btn-ghost grande" data-a="entrarInvitado">Entrar como invitado</button>' +
+      '<p class="mini nota-inv">Es una demo con ejemplos: no ve ni modifica la lista de la estancia.</p></div>';
   }
 
   function vistaCargando(txt, conBoton) {
@@ -392,6 +436,7 @@
   }
 
   function estadoSync() {
+    if (esDemo()) return { cls: 'prueba', txt: 'Modo demo' };
     if (S.be.mode === 'local') return { cls: 'prueba', txt: 'Modo prueba' };
     if (!S.online) return { cls: 'off', txt: 'Sin señal · se guarda igual' };
     if (S.meta.pending) return { cls: 'pend', txt: 'Guardando…' };
@@ -408,7 +453,7 @@
     var sync = estadoSync();
     return '<header class="top">' + LOGO(44) +
       '<div><h1 class="marca">Pila<span>Log</span></h1><p class="lema">Logística de la estancia</p></div>' +
-      '<div class="top-der"><span class="rol">' + rolNombre(rol()) + '</span>' +
+      '<div class="top-der"><span class="rol' + (esDemo() ? ' inv' : '') + '">' + rolNombre(rol()) + '</span>' +
       '<span class="sync ' + sync.cls + '"><i></i>' + sync.txt + '</span></div></header>' +
       '<div class="guarda"></div>' + chipViaje() +
       '<main class="vista">' + vista + '</main>' +
@@ -454,14 +499,22 @@
     return '';
   }
 
+  function bannerDemo() {
+    if (!esDemo()) return '';
+    var como = esJavier() ? 'Javier' : 'Papá';
+    return '<div class="banner modo"><b>Modo invitado.</b> Probá todo con libertad: es una demo y no toca la lista real. Estás viendo la app como ' + como + '.' +
+      '<br><button class="btn btn-ghost btn-s" data-a="cambiarVista">' + textoCambiarVista() + '</button></div>';
+  }
+  function textoCambiarVista() { return esJavier() ? 'Ver como Papá' : 'Ver como Javier'; }
+
   function vistaLista() {
     var items = S.items.slice().sort(ordenar);
     var pend = items.filter(function (i) { return i.estado === 'pedido' || i.estado === 'noconseguido'; });
     var comp = items.filter(function (i) { return i.estado === 'comprado'; });
     var llev = items.filter(function (i) { return i.estado === 'llevado'; });
     var total = items.length;
-    var html = bannerInstalar(false) + bannerViaje();
-    if (S.be.mode === 'local' && esJavier()) {
+    var html = bannerDemo() + bannerInstalar(false) + bannerViaje();
+    if (S.be.mode === 'local' && esJavier() && !esDemo()) {
       html += '<div class="banner modo"><b>Modo prueba:</b> esta lista vive solo en este teléfono. Cuando conectes Firebase, Papá la verá en el suyo.</div>';
     }
     html += '<h2 class="t1">' + (esJavier() ? 'Lista del viaje' : 'Lo que hace falta en la estancia') + '</h2>';
@@ -491,6 +544,16 @@
     return html;
   }
 
+  function porUnidad(it) { return it.unidad === 'u.' ? 'c/u' : 'por ' + it.unidad; }
+  function textoPrecio(it, u) {
+    if (u.total) return plata(u.monto) + ' en total (' + plata(u.unit) + ' ' + porUnidad(it) + ')';
+    if (u.pack > 1) {
+      return plata(u.monto) + ' el pack de ' + cantTxt(u.pack) + ' ' + it.unidad + ' (' + plata(u.unit) + ' ' + porUnidad(it) + ') · ' +
+        u.packs + (u.packs === 1 ? ' pack' : ' packs') + (u.sobra > 0 ? ', sobran ' + cantTxt(u.sobra) + ' ' + it.unidad : '');
+    }
+    return plata(u.monto) + ' ' + porUnidad(it);
+  }
+
   function tarjetaItem(it) {
     var cat = catDe(it.cat);
     var u = esJavier() ? precioUnit(it) : null;
@@ -513,7 +576,7 @@
       ' <span class="tag s-' + it.estado + '">' + ESTADO[it.estado] + '</span></p>' +
       (it.nota ? '<p class="nota">' + esc(it.nota) + '</p>' : '') +
       (it.estado === 'noconseguido' && it.motivo ? '<p class="motivo">No se consiguió: ' + esc(it.motivo) + '</p>' : '') +
-      (u ? '<p class="precio-linea">' + (u.elegido ? 'Precio: ' : 'Mejor precio: ') + plata(u.monto) + ' c/u · ' + esc(u.lugar) + '</p>' : '') +
+      (u ? '<p class="precio-linea">' + (u.elegido ? 'Precio: ' : 'Mejor precio: ') + textoPrecio(it, u) + ' · ' + esc(u.lugar) + '</p>' : '') +
       '</button>' +
       (acciones ? '<div class="item-pie">' + acciones + '</div>' : '') + '</article>';
   }
@@ -524,11 +587,11 @@
     S.items.forEach(function (it) {
       var u = precioUnit(it);
       if (!u) { r.sinPrecio++; return; }
-      r.estimado += u.monto * it.cant;
-      if (u.elegido && (it.estado === 'comprado' || it.estado === 'llevado')) r.confirmado += u.monto * it.cant;
+      r.estimado += u.sub;
+      if (u.elegido && (it.estado === 'comprado' || it.estado === 'llevado')) r.confirmado += u.sub;
       if (it.precios.length > 1) {
-        var max = Math.max.apply(null, it.precios.map(function (p) { return p.monto; }));
-        r.ahorro += (max - u.monto) * it.cant;
+        var max = Math.max.apply(null, it.precios.map(function (p) { return costoDe(it, p).sub; }));
+        r.ahorro += max - u.sub;
       }
     });
     return r;
@@ -560,11 +623,12 @@
     });
     html += '<div class="sep"><h2>Dónde comprar</h2><span>' + nombres.length + (nombres.length === 1 ? ' lugar' : ' lugares') + '</span></div>' +
       '<div class="tarjeta">' + nombres.map(function (n) {
-        var suma = grupos[n].reduce(function (a, g) { return a + (g.u ? g.u.monto * g.it.cant : 0); }, 0);
+        var suma = grupos[n].reduce(function (a, g) { return a + (g.u ? g.u.sub : 0); }, 0);
         return '<div class="lugar"><h3><span>' + esc(n) + '</span><span>' + (n === 'Sin cotizar' ? '' : plata(suma)) + '</span></h3><ul>' +
           grupos[n].map(function (g) {
-            return '<li class="' + (g.it.estado === 'comprado' ? 'hecho' : '') + '"><span>' + esc(g.it.nombre) + ' · ' + cantTxt(g.it.cant) + ' ' + esc(g.it.unidad) + '</span>' +
-              '<span>' + (g.u ? plata(g.u.monto * g.it.cant) : '') + '</span></li>';
+            return '<li class="' + (g.it.estado === 'comprado' ? 'hecho' : '') + '"><span>' + esc(g.it.nombre) + ' · ' + cantTxt(g.it.cant) + ' ' + esc(g.it.unidad) +
+              (g.u && g.u.packs ? ' · ' + g.u.packs + (g.u.packs === 1 ? ' pack' : ' packs') : '') + '</span>' +
+              '<span>' + (g.u ? plata(g.u.sub) : '') + '</span></li>';
           }).join('') + '</ul></div>';
       }).join('') + '</div>';
 
@@ -577,10 +641,18 @@
       return '<article class="item e-' + it.estado + '"><h3>' + esc(it.nombre) + '</h3>' +
         '<p class="meta"><b>' + cantTxt(it.cant) + ' ' + esc(it.unidad) + '</b> <span class="tag s-' + it.estado + '">' + ESTADO[it.estado] + '</span></p>' +
         '<div class="cot-lista">' + it.precios.map(function (p) {
+          var c = costoDe(it, p);
+          var detalle = c.total ? 'Total del ticket · ' + plata(c.unit) + ' ' + porUnidad(it)
+            : c.pack > 1 ? 'Pack de ' + cantTxt(c.pack) + ' ' + it.unidad + ' · ' + plata(c.unit) + ' ' + porUnidad(it) + (c.sobra > 0 ? ' · sobran ' + cantTxt(c.sobra) + ' ' + it.unidad : '')
+              : '';
+          var der = c.total ? 'total'
+            : c.pack > 1 ? c.packs + (c.packs === 1 ? ' pack' : ' packs') + ' = ' + plata(c.sub)
+              : (it.cant !== 1 ? '× ' + cantTxt(it.cant) + ' = ' + plata(c.sub) : 'c/u');
           return '<div class="cot ' + (p.id === it.elegido ? 'elegida' : '') + '">' +
             '<button class="cot-pick" data-a="elegir" data-id="' + it.id + '" data-q="' + p.id + '" aria-pressed="' + (p.id === it.elegido) + '">' +
-            '<span class="radio"></span><span class="cot-lugar">' + esc(p.lugar) + (p.id === barata ? ' <span class="tag barata">Más barato</span>' : '') + '</span>' +
-            '<span class="cot-monto">' + plata(p.monto) + '<span class="cot-sub">' + (it.cant !== 1 ? '× ' + cantTxt(it.cant) + ' = ' + plata(p.monto * it.cant) : 'c/u') + '</span></span></button>' +
+            '<span class="radio"></span><span class="cot-lugar">' + esc(p.lugar) + (p.id === barata ? ' <span class="tag barata">Más barato</span>' : '') +
+            (detalle ? '<span class="cot-pack">' + esc(detalle) + '</span>' : '') + '</span>' +
+            '<span class="cot-monto">' + plata(p.monto) + '<span class="cot-sub">' + esc(der) + '</span></span></button>' +
             '<button class="x" data-a="borrarCot" data-id="' + it.id + '" data-q="' + p.id + '" aria-label="Borrar precio de ' + esc(p.lugar) + '">✕</button></div>';
         }).join('') + '</div>' +
         '<button class="btn btn-ghost btn-s add-cot" data-a="cotizar" data-id="' + it.id + '">＋ Agregar precio</button></article>';
@@ -652,11 +724,11 @@
       [[1, 'Normal'], [1.15, 'Grande'], [1.3, 'Enorme']].map(function (e) {
         return '<button class="btn" data-a="escala" data-v="' + e[0] + '" aria-pressed="' + (escala === e[0]) + '">' + e[1] + '</button>';
       }).join('') + '</div></div>' +
-      '<div class="ajuste"><b>Avisos en el teléfono</b><p class="mini">Te avisan cuando el otro cambia la lista y cuando se acerca el viaje (con la app abierta o en segundo plano, según el aparato).</p>' +
+      (esDemo() ? '' : '<div class="ajuste"><b>Avisos en el teléfono</b><p class="mini">Te avisan cuando el otro cambia la lista y cuando se acerca el viaje (con la app abierta o en segundo plano, según el aparato).</p>' +
       (notif === 'granted' ? '<p class="mini"><b>Activados ✔</b></p>'
         : notif === 'denied' && 'Notification' in window ? '<p class="mini">Están bloqueados. Activalos desde los permisos del navegador.</p>'
           : !('Notification' in window) ? '<p class="mini">Este navegador no los permite.</p>'
-            : '<button class="btn btn-ghost" data-a="notif">Activar avisos</button>') + '</div>' +
+            : '<button class="btn btn-ghost" data-a="notif">Activar avisos</button>') + '</div>') +
       (S.instalar ? '<div class="ajuste"><b>Instalar la app</b><p class="mini">Queda como un ícono más en la pantalla de inicio.</p><button class="btn btn-ok" data-a="instalar">Instalar PilaLog</button></div>'
         : '<div class="ajuste"><b>Instalar la app</b><p class="mini">Abrí el menú ⋮ de Chrome y elegí “Instalar aplicación” o “Agregar a la pantalla principal”.</p></div>') +
       '</section>';
@@ -667,7 +739,13 @@
       '<label class="campo"><span>WhatsApp de Papá</span><input type="tel" name="telPapa" inputmode="tel" value="' + esc(S.ajustes.telPapa || '') + '"></label>' +
       '<button class="btn btn-ghost">Guardar números</button></form></section>';
 
-    if (esJavier()) {
+    if (esDemo()) {
+      html += '<section class="tarjeta"><h2 class="t2">Modo invitado</h2>' +
+        '<p class="mini" style="margin-bottom:.6rem">Estás en una demo con ejemplos. Lo que hagas acá no toca la lista real.</p>' +
+        '<button class="btn btn-ok" data-a="cambiarVista">' + textoCambiarVista() + '</button>' +
+        '<button class="btn btn-ghost" style="margin-top:.5rem" data-a="reiniciarDemo">Reiniciar la demo</button>' +
+        '<button class="btn btn-peli" style="margin-top:.5rem" data-a="salirInvitado">Salir del modo invitado</button></section>';
+    } else if (esJavier()) {
       var link = linkPara('papa');
       html += '<section class="tarjeta"><h2 class="t2">Papá y la estancia</h2>' +
         '<div class="ajuste"><b>Link para Papá</b><p class="mini">Mandáselo por WhatsApp. Lo abre en Chrome, toca “Instalar” y listo: ya ve la lista.</p>' +
@@ -682,9 +760,14 @@
 
       html += '<section class="tarjeta"><h2 class="t2">Respaldo</h2>' +
         '<button class="btn btn-ghost" data-a="exportar">Descargar respaldo (.json)</button>' +
-        '<label class="btn btn-ghost" style="margin-top:.5rem;width:100%">Restaurar un respaldo<input type="file" accept="application/json,.json" data-c="importar" hidden></label></section>';
+        '<label class="btn btn-ghost" style="margin-top:.5rem;width:100%">Restaurar un respaldo<input type="file" accept="application/json,.json" data-c="importar" hidden></label></section>' +
+        '<section class="tarjeta"><h2 class="t2">Mostrar la app a otra persona</h2>' +
+        '<p class="mini" style="margin-bottom:.6rem">El modo invitado es una demo con ejemplos: quien entra no ve ni cambia la lista de la estancia.</p>' +
+        '<button class="btn btn-ok" data-a="entrarInvitado">Entrar en modo invitado</button>' +
+        '<button class="btn btn-ghost" style="margin-top:.5rem" data-a="copiarLinkInvitado">Copiar link para invitados</button></section>';
     }
 
+    if (esDemo()) return html + '<p class="mini" style="text-align:center">PilaLog 1.0 · hecho por RED para la estancia</p>';
     html += '<section class="tarjeta"><h2 class="t2">Este aparato</h2>' +
       '<p class="mini" style="margin-bottom:.6rem">' + (S.be.mode === 'local'
         ? 'Funcionando en modo prueba: los datos están solo en este teléfono.'
@@ -730,16 +813,63 @@
       '<button type="button" class="btn btn-ghost" data-a="cerrarSheet">Cancelar</button></div></form>');
   }
 
+  function camposPrecio(it, p, requerido) {
+    var modo = p && p.total ? 'total' : p && p.pack > 1 ? 'pack' : 'unidad';
+    var un = it.unidad === 'u.' ? 'unidad' : it.unidad;
+    var chip = function (v, txt) {
+      return '<label><input type="radio" name="modo" value="' + v + '" data-c="modoPrecio"' + (modo === v ? ' checked' : '') + '><span>' + txt + '</span></label>';
+    };
+    return '<div class="campo"><span>¿Cómo es el precio?</span><div class="cats">' +
+      chip('unidad', 'Por cada ' + esc(un)) + chip('pack', 'De un pack o bolsa cerrada') + chip('total', 'El total del ticket') + '</div></div>' +
+      '<label class="campo"><span data-r="titMonto">' + esc(tituloMonto(modo, un)) + '</span>' +
+      '<input type="text" name="monto" inputmode="decimal"' + (requerido ? ' required' : '') + ' value="' + (p ? esc(String(p.monto).replace('.', ',')) : '') + '" placeholder="0"></label>' +
+      '<label class="campo" data-r="campoPack"' + (modo === 'pack' ? '' : ' hidden') + '><span>¿Cuánto trae el pack? (en ' + esc(un) + ')</span>' +
+      '<input type="text" name="pack" inputmode="decimal" value="' + (p && p.pack > 1 ? esc(cantTxt(p.pack)) : '') + '" placeholder="Ej: 10"></label>';
+  }
+  function tituloMonto(modo, un) {
+    return modo === 'pack' ? 'Precio del pack ($)' : modo === 'total' ? 'Total pagado por este pedido ($)' : 'Precio por cada ' + un + ' ($)';
+  }
+  // Lee los campos de precio: { vacio } | { error } | { monto, pack?, total? }
+  function leerPrecio(f) {
+    var txt = f.elements.monto.value.trim();
+    if (!txt) return { vacio: true };
+    var monto = aNumero(txt);
+    if (isNaN(monto) || monto < 0) return { error: 'Revisá el precio.' };
+    var modo = (f.querySelector('input[name="modo"]:checked') || {}).value || 'unidad';
+    var r = { monto: monto };
+    if (modo === 'pack') {
+      var pk = aNumero(f.elements.pack.value);
+      if (isNaN(pk) || !(pk > 0)) return { error: 'Anotá cuánto trae el pack.' };
+      if (pk > 1) r.pack = pk;
+    } else if (modo === 'total') {
+      r.total = true;
+    }
+    return r;
+  }
+  // Agrega el precio o, si el lugar ya existe, lo actualiza.
+  function aplicarPrecio(precios, lugar, pr) {
+    precios = precios.slice();
+    var q = precios.find(function (p) { return p.lugar.toLowerCase() === lugar.toLowerCase(); });
+    var nuevo = q ? Object.assign({}, q) : { id: uid(), lugar: lugar };
+    delete nuevo.pack; delete nuevo.total;
+    nuevo.monto = pr.monto;
+    if (pr.pack > 1) nuevo.pack = pr.pack;
+    if (pr.total) nuevo.total = true;
+    if (q) precios = precios.map(function (p) { return p.id === q.id ? nuevo : p; });
+    else precios.push(nuevo);
+    return { precios: precios, q: nuevo };
+  }
+
   function sheetComprar(id) {
     var it = S.items.find(function (x) { return x.id === id; });
     if (!it) return;
     var u = precioUnit(it);
     abrirSheet('Comprado: ' + it.nombre,
       '<form data-form="comprar" data-id="' + it.id + '" autocomplete="off">' +
-      '<p class="mini">Anotá dónde lo compraste y a cuánto salió cada unidad, así queda para comparar.</p>' +
+      '<p class="mini">Anotá dónde lo compraste y cuánto salió, así queda para comparar.</p>' +
       '<label class="campo"><span>Lugar</span><input type="text" name="lugar" list="dl-lugares" maxlength="60" value="' + esc(u ? u.lugar : '') + '" placeholder="Ej: Supermercado Pilagá"' + (u ? '' : ' autofocus') + '>' +
       '<datalist id="dl-lugares">' + lugaresConocidos().map(function (n) { return '<option value="' + esc(n) + '">'; }).join('') + '</datalist></label>' +
-      '<label class="campo"><span>Precio por unidad ($)</span><input type="text" name="monto" inputmode="decimal" value="' + (u ? esc(String(u.monto).replace('.', ',')) : '') + '" placeholder="0"></label>' +
+      camposPrecio(it, u && u.p, false) +
       '<div class="acciones"><button class="btn btn-ok grande">Marcar como comprado</button>' +
       '<button type="button" class="btn btn-ghost" data-a="compradoSinPrecio" data-id="' + it.id + '">Comprado, sin anotar precio</button>' +
       '<button type="button" class="btn btn-ghost" data-a="cerrarSheet">Cancelar</button></div></form>');
@@ -753,7 +883,7 @@
       '<p class="mini">Cargá lo que vale en cada lugar para descartar opciones. Si repetís un lugar, se actualiza su precio.</p>' +
       '<label class="campo"><span>Lugar</span><input type="text" name="lugar" required list="dl-lugares" maxlength="60" placeholder="Ej: Mayorista del centro" autofocus>' +
       '<datalist id="dl-lugares">' + lugaresConocidos().map(function (n) { return '<option value="' + esc(n) + '">'; }).join('') + '</datalist></label>' +
-      '<label class="campo"><span>Precio por unidad ($)</span><input type="text" name="monto" required inputmode="decimal" placeholder="0"></label>' +
+      camposPrecio(it, null, true) +
       '<div class="acciones"><button class="btn btn-pri grande">Guardar precio</button>' +
       '<button type="button" class="btn btn-ghost" data-a="cerrarSheet">Cancelar</button></div></form>');
   }
@@ -809,7 +939,7 @@
     var quedan = S.items.filter(function (i) { return i.estado !== 'llevado'; });
     var total = 0;
     var snap = llev.map(function (i) {
-      var u = precioUnit(i), sub = u ? u.monto * i.cant : null;
+      var u = precioUnit(i), sub = u ? u.sub : null;
       total += sub || 0;
       return { nombre: i.nombre, cant: i.cant, unidad: i.unidad, cat: i.cat, lugar: u ? u.lugar : '', monto: u ? u.monto : null, subtotal: sub };
     });
@@ -899,16 +1029,57 @@
       n++;
       return Object.assign({ id: uid() + n, nombre: nombre, cant: cant, unidad: unidad, cat: cat, nota: '', urgente: false, estado: 'pedido', precios: [], elegido: null, arrastrado: 0, creado: ahora + n, actualizado: ahora + n, por: rol() }, extra || {});
     };
-    var q = function (lugar, monto) { return { id: uid() + lugar.length, lugar: lugar, monto: monto }; };
+    var q = function (lugar, monto, pack) {
+      var p = { id: uid() + lugar.length, lugar: lugar, monto: monto };
+      if (pack > 1) p.pack = pack;
+      return p;
+    };
     var yerba = [q('Supermercado Pilagá', 4200), q('Mayorista del centro', 3650)];
     [
       mk('Yerba mate', 6, 'kg', 'almacen', { nota: 'La de siempre, paquetes de 1 kilo', urgente: true, precios: yerba, elegido: yerba[1].id }),
       mk('Alambre de púas', 2, 'rollo', 'ferreteria', { nota: 'Para el cerco del potrero norte' }),
       mk('Vacuna antiaftosa', 40, 'u.', 'veterinaria', { precios: [q('Veterinaria Rural', 1900)] }),
       mk('Filtro de aceite', 1, 'u.', 'repuestos', { estado: 'noconseguido', motivo: 'No había para la camioneta', arrastrado: 1 }),
-      mk('Sal gruesa', 5, 'bolsa', 'almacen', { estado: 'comprado', precios: [q('Mayorista del centro', 1200)] })
+      mk('Sal gruesa', 5, 'bolsa', 'almacen', { estado: 'comprado', precios: [q('Mayorista del centro', 1200)] }),
+      mk('Harina 0000', 10, 'kg', 'almacen', { nota: 'Bolsa cerrada de 10 kg', precios: [q('Mayorista del centro', 10500, 10), q('Supermercado Pilagá', 1150)] })
     ].forEach(function (it) { guardar(S.be.putItem(it)); });
     if (!S.ajustes.fechaViaje) { var d = new Date(); d.setDate(d.getDate() + 9); ajustes({ fechaViaje: isoDe(d) }); }
+  }
+
+  /* ================================================================ modo invitado */
+  function sembrarDemo() {
+    if (!esDemo() || S.sembrando || !S.loaded.items || !S.loaded.settings) return;
+    if (S.items.length || S.ajustes.demoSembrado) return;
+    S.sembrando = true;
+    ajustes({ demoSembrado: true });
+    ejemplos();
+  }
+
+  function limpiarEstado() {
+    S.tk++;
+    S.desub.forEach(function (f) { try { f(); } catch (e) { /* ya cerrado */ } });
+    S.desub = []; S.be = null; S.items = []; S.trips = []; S.ajustes = {}; S.sellos = {};
+    S.error = ''; S.tab = 'lista'; S.cb = null; S.sembrando = false;
+    S.loaded = { items: false, settings: false };
+    S.meta = { pending: false, fromCache: false };
+    cerrarSheet();
+  }
+  function entrarInvitado() {
+    ssSet(SES.invitado, '1');
+    if (!ssGet(SES.vista)) ssSet(SES.vista, 'javier');
+    limpiarEstado();
+    S.perfil = perfilDemo();
+    conectar();
+  }
+  function salirInvitado() {
+    ssDel(SES.invitado); ssDel(SES.vista);
+    limpiarEstado();
+    S.perfil = null;
+    try {
+      var p = JSON.parse(lsGet(LS.perfil) || 'null');
+      if (p && codigoValido(p.codigo)) S.perfil = { codigo: p.codigo, rol: p.rol === 'javier' ? 'javier' : 'papa' };
+    } catch (e) { /* perfil dañado: vuelve a la bienvenida */ }
+    if (S.perfil) conectar(); else render();
   }
 
   function dictar(boton) {
@@ -1018,7 +1189,25 @@
       abrirWapp(S.ajustes.telPapa, txt);
     },
     exportar: function () { exportar(); },
+    entrarInvitado: function () { entrarInvitado(); },
+    salirInvitado: function () { salirInvitado(); },
+    cambiarVista: function () {
+      ssSet(SES.vista, esJavier() ? 'papa' : 'javier');
+      S.tab = 'lista';
+      render();
+      window.scrollTo(0, 0);
+    },
+    reiniciarDemo: function () {
+      confirmar('Reiniciar la demo', 'Se borran los cambios que hiciste en la demo y vuelven los ejemplos del principio. La lista real no se toca.', 'Reiniciar', function () {
+        lsDel('pilalog:datos:' + DEMO_CODIGO);
+        limpiarEstado();
+        S.perfil = perfilDemo();
+        conectar();
+      }, true);
+    },
+    copiarLinkInvitado: function () { copiarTexto(location.origin + location.pathname + '?invitado=1', 'Link para invitados copiado'); },
     desvincular: function () {
+      if (esDemo()) { salirInvitado(); return; }
       confirmar('Salir de esta estancia', 'Este aparato deja de mostrar la lista. La lista no se borra: con el link o el código volvés a entrar.', 'Salir', function () {
         S.desub.forEach(function (f) { try { f(); } catch (e) { /* ya cerrado */ } });
         S.desub = []; S.be = null; S.perfil = null; S.items = []; S.trips = []; S.ajustes = {}; S.error = '';
@@ -1070,14 +1259,14 @@
       var id = f.dataset.id, it = buscar(id);
       if (!it) return;
       var lugar = f.elements.lugar.value.trim();
-      var monto = aNumero(f.elements.monto.value);
+      var pr = leerPrecio(f);
+      if (pr.error) { aviso(pr.error); return; }
+      if (pr.vacio) pr = null;
+      else if (!lugar) { aviso('Anotá también el lugar, o borrá el precio.'); return; }
       var parche = { estado: 'comprado', motivo: '' };
-      if (lugar && monto >= 0 && !isNaN(monto)) {
-        var precios = it.precios.slice();
-        var q = precios.find(function (p) { return p.lugar.toLowerCase() === lugar.toLowerCase(); });
-        if (q) { q = Object.assign({}, q, { monto: monto }); precios = precios.map(function (p) { return p.id === q.id ? q : p; }); }
-        else { q = { id: uid(), lugar: lugar, monto: monto }; precios.push(q); }
-        parche.precios = precios; parche.elegido = q.id;
+      if (pr) {
+        var r = aplicarPrecio(it.precios, lugar, pr);
+        parche.precios = r.precios; parche.elegido = r.q.id;
       }
       cerrarSheet();
       cambiar(id, parche);
@@ -1087,14 +1276,12 @@
       var id = f.dataset.id, it = buscar(id);
       if (!it) return;
       var lugar = f.elements.lugar.value.trim();
-      var monto = aNumero(f.elements.monto.value);
-      if (!lugar || isNaN(monto)) { aviso('Falta el lugar o el precio.'); return; }
-      var precios = it.precios.slice();
-      var q = precios.find(function (p) { return p.lugar.toLowerCase() === lugar.toLowerCase(); });
-      if (q) precios = precios.map(function (p) { return p.id === q.id ? Object.assign({}, p, { monto: monto }) : p; });
-      else precios.push({ id: uid(), lugar: lugar, monto: monto });
+      var pr = leerPrecio(f);
+      if (pr.error || pr.vacio) { aviso(pr.error || 'Revisá el precio.'); return; }
+      if (!lugar) { aviso('Falta el lugar.'); return; }
+      var r = aplicarPrecio(it.precios, lugar, pr);
       cerrarSheet();
-      cambiar(id, { precios: precios });
+      cambiar(id, { precios: r.precios });
       aviso('Precio guardado');
     },
     noConseguido: function (f) {
@@ -1126,6 +1313,15 @@
   var CAMBIOS = {
     avisoDias: function (el) { ajustes({ avisoDias: Number(el.value) }); },
     verCostos: function (el) { ajustes({ verCostosPapa: el.checked }); },
+    modoPrecio: function (el) {
+      var f = el.closest('form');
+      if (!f) return;
+      var modo = (f.querySelector('input[name="modo"]:checked') || {}).value || 'unidad';
+      var it = buscar(f.dataset.id);
+      var un = it && it.unidad !== 'u.' ? it.unidad : 'unidad';
+      f.querySelector('[data-r="titMonto"]').textContent = tituloMonto(modo, un);
+      f.querySelector('[data-r="campoPack"]').hidden = modo !== 'pack';
+    },
     importar: function (el) { if (el.files && el.files[0]) { importar(el.files[0]); el.value = ''; } }
   };
 
@@ -1170,9 +1366,18 @@
     var url = new URLSearchParams(location.search);
     var c = (url.get('c') || '').toLowerCase();
     if (codigoValido(c)) {
+      // Un link real tiene prioridad y borra la marca de invitado.
+      ssDel(SES.invitado); ssDel(SES.vista);
       S.perfil = { codigo: c, rol: url.get('r') === 'javier' ? 'javier' : 'papa' };
       lsSet(LS.perfil, JSON.stringify(S.perfil));
       try { history.replaceState(null, '', location.pathname); } catch (e) { /* nada */ }
+    } else if (url.get('invitado') === '1' || ssGet(SES.invitado) === '1') {
+      ssSet(SES.invitado, '1');
+      if (!ssGet(SES.vista)) ssSet(SES.vista, 'javier');
+      S.perfil = perfilDemo();
+      if (url.get('invitado') === '1') {
+        try { history.replaceState(null, '', location.pathname); } catch (e) { /* nada */ }
+      }
     } else {
       try {
         var p = JSON.parse(lsGet(LS.perfil) || 'null');

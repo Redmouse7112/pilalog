@@ -79,6 +79,7 @@ h1, h2, h3, p { margin: 0; }
   font-size: .8rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
   background: var(--oro); color: var(--cuero); padding: .15rem .6rem; border-radius: 999px;
 }
+.rol.inv { background: #8cb7d8; }
 .sync { font-size: .78rem; display: inline-flex; align-items: center; gap: .35rem; color: rgba(244, 233, 209, .9); }
 .sync i { width: .6rem; height: .6rem; border-radius: 50%; background: #8fbf5a; display: inline-block; }
 .sync.pend i { background: var(--oro); }
@@ -248,6 +249,7 @@ details.plegable[open] > summary::after { content: "▴"; }
 .cot.elegida .radio { border-color: var(--pasto); background: radial-gradient(var(--pasto) 45%, #fff 50%); }
 .cot-lugar { flex: 1; font-weight: 700; word-break: break-word; }
 .cot-monto { font-weight: 700; white-space: nowrap; }
+.cot-pack { display: block; font-size: .82rem; font-weight: 400; color: var(--suave); }
 .cot-sub { display: block; font-size: .8rem; color: var(--suave); font-weight: 400; text-align: right; }
 .cot .x { flex: none; width: 2.8rem; border: 2px solid var(--linea); border-radius: 10px; background: transparent; color: var(--suave); font-size: 1.1rem; }
 .tag.barata { background: var(--pasto); color: #f5f8e8; margin-left: 0; }
@@ -367,3 +369,5 @@ input:focus, select:focus, textarea:focus { outline: 3px solid rgba(212, 166, 42
 @media (prefers-reduced-motion: reduce) {
   .sheet-card, .toast { animation: none; }
 }
+.bienvenida .sep-inv { border: 0; border-top: 2px dashed var(--linea); margin: 1.4rem 0 1rem; }
+.bienvenida .nota-inv { margin-top: .5rem; }

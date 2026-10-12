@@ -146,7 +146,9 @@
   /* ------------------------------------------------------------------ API */
   window.PilaBackend = {
     configurado: function () { return configurado(window.PILALOG_FIREBASE); },
-    crear: function (codigo) {
+    crear: function (codigo, opciones) {
+      // Modo invitado: siempre motor local, sin cargar nunca Firebase.
+      if (opciones && opciones.local) return Promise.resolve(crearLocal(codigo));
       if (configurado(window.PILALOG_FIREBASE)) return crearFirebase(window.PILALOG_FIREBASE, codigo);
       return Promise.resolve(crearLocal(codigo));
     }
